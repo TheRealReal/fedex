@@ -9,13 +9,20 @@ module Fedex
         puts api_response if @debug
         response = parse_response(api_response)
         if success?(response)
-          rate_details = [response[:rate_reply][:rate_reply_details][:rated_shipment_details]].flatten.first[:shipment_rate_detail]
-          Fedex::Rate.new(rate_details)
+          rate_reply_details = response[:rate_reply][:rate_reply_details] || []
+          rate_reply_details = [rate_reply_details] if rate_reply_details.is_a?(Hash)
+
+          rate_reply_details.map do |rate_reply|
+            rate_details = [rate_reply[:rated_shipment_details]].flatten.first[:shipment_rate_detail]
+            rate_details.merge!(service_type: rate_reply[:service_type])
+            rate_details.merge!(transit_time: rate_reply[:transit_time])
+            Fedex::Rate.new(rate_details)
+          end
         else
           error_message = if response[:rate_reply]
             [response[:rate_reply][:notifications]].flatten.first[:message]
           else
-            api_response["Fault"]["detail"]["fault"]["reason"]
+            "#{api_response["Fault"]["detail"]["fault"]["reason"]}\n--#{api_response["Fault"]["detail"]["fault"]["details"]["ValidationFailureDetail"]["message"].join("\n--")}"
           end rescue $1
           raise RateError, error_message
         end
@@ -27,24 +34,31 @@ module Fedex
       def add_requested_shipment(xml)
         xml.RequestedShipment{
           xml.DropoffType @shipping_options[:drop_off_type] ||= "REGULAR_PICKUP"
-          xml.ServiceType service_type
+          xml.ServiceType service_type if service_type
           xml.PackagingType @shipping_options[:packaging_type] ||= "YOUR_PACKAGING"
           add_shipper(xml)
           add_recipient(xml)
           add_shipping_charges_payment(xml)
-          add_customs_clearance(xml) if @customs_clearance
+          add_customs_clearance(xml) if @customs_clearance_detail
           xml.RateRequestTypes "ACCOUNT"
           add_packages(xml)
         }
       end
 
+      # Add transite time options
+      def add_transit_time(xml)
+        xml.ReturnTransitAndCommit true
+      end
+
       # Build xml Fedex Web Service request
       def build_xml
+        ns = "http://fedex.com/ws/rate/v#{service[:version]}"
         builder = Nokogiri::XML::Builder.new do |xml|
-          xml.RateRequest(:xmlns => "http://fedex.com/ws/rate/v10"){
+          xml.RateRequest(:xmlns => ns){
             add_web_authentication_detail(xml)
             add_client_detail(xml)
             add_version(xml)
+            add_transit_time(xml)
             add_requested_shipment(xml)
           }
         end
@@ -52,7 +66,7 @@ module Fedex
       end
 
       def service
-        { :id => 'crs', :version => 10 }
+        { :id => 'crs', :version => Fedex::API_VERSION }
       end
 
       # Successful request

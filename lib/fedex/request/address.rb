@@ -9,6 +9,8 @@ module Fedex
         requires!(options, :address)
         @credentials = credentials
         @address     = options[:address]
+
+        @address[:address] ||= @address[:street]
       end
 
       def process_request
@@ -17,13 +19,13 @@ module Fedex
         response = parse_response(api_response)
         if success?(response)
           options = response[:address_validation_reply][:address_results][:proposed_address_details]
-
+          options = options.first if options.is_a? Array
           Fedex::Address.new(options)
         else
           error_message = if response[:address_validation_reply]
             [response[:address_validation_reply][:notifications]].flatten.first[:message]
           else
-            api_response["Fault"]["detail"]["fault"]["reason"]
+            "#{api_response["Fault"]["detail"]["fault"]["reason"]}\n--#{api_response["Fault"]["detail"]["fault"]["details"]["ValidationFailureDetail"]["message"].join("\n--")}"
           end rescue $1
           raise RateError, error_message
         end
@@ -34,7 +36,7 @@ module Fedex
       # Build xml Fedex Web Service request
       def build_xml
         builder = Nokogiri::XML::Builder.new do |xml|
-          xml.AddressValidationRequest(:xmlns => "http://fedex.com/ws/addressvalidation/v2"){
+          xml.AddressValidationRequest(:xmlns => "http://fedex.com/ws/addressvalidation/v#{service[:version]}"){
             add_web_authentication_detail(xml)
             add_client_detail(xml)
             add_version(xml)
@@ -67,8 +69,11 @@ module Fedex
 
       def add_address_to_validate(xml)
         xml.AddressesToValidate{
+          xml.CompanyName           @address[:company] unless @address[:company].nil? or @address[:company].empty?
           xml.Address{
-            xml.StreetLines         @address[:street]
+            Array(@address[:address]).take(2).each do |address_line|
+              xml.StreetLines address_line
+            end
             xml.City                @address[:city]
             xml.StateOrProvinceCode @address[:state]
             xml.PostalCode          @address[:postal_code]

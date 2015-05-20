@@ -12,10 +12,10 @@ module Fedex
       # If true the rate method will return the complete response from the Fedex Web Service
       attr_accessor :debug
       # Fedex Text URL
-      TEST_URL = "https://gatewaybeta.fedex.com:443/xml/"
+      TEST_URL = "https://wsbeta.fedex.com:443/xml/"
 
       # Fedex Production URL
-      PRODUCTION_URL = "https://gateway.fedex.com:443/xml/"
+      PRODUCTION_URL = "https://ws.fedex.com:443/xml/"
 
       # List of available Service Types
       SERVICE_TYPES = %w(EUROPE_FIRST_INTERNATIONAL_PRIORITY FEDEX_1_DAY_FREIGHT FEDEX_2_DAY FEDEX_2_DAY_AM FEDEX_2_DAY_FREIGHT FEDEX_3_DAY_FREIGHT FEDEX_EXPRESS_SAVER FEDEX_FIRST_FREIGHT FEDEX_FREIGHT_ECONOMY FEDEX_FREIGHT_PRIORITY FEDEX_GROUND FIRST_OVERNIGHT GROUND_HOME_DELIVERY INTERNATIONAL_ECONOMY INTERNATIONAL_ECONOMY_FREIGHT INTERNATIONAL_FIRST INTERNATIONAL_PRIORITY INTERNATIONAL_PRIORITY_FREIGHT PRIORITY_OVERNIGHT SMART_POST STANDARD_OVERNIGHT)
@@ -32,6 +32,12 @@ module Fedex
       # Recipient Custom ID Type
       RECIPIENT_CUSTOM_ID_TYPE = %w(COMPANY INDIVIDUAL PASSPORT)
 
+      # List of available Payment Types
+      PAYMENT_TYPE = %w(RECIPIENT SENDER THIRD_PARTY)
+
+      # List of available Carrier Codes
+      CARRIER_CODES = %w(FDXC FDXE FDXG FDCC FXFR FXSP)
+
       # In order to use Fedex rates API you must first apply for a developer(and later production keys),
       # Visit {http://www.fedex.com/us/developer/ Fedex Developer Center} for more information about how to obtain your keys.
       # @param [String] key - Fedex web service key
@@ -42,11 +48,24 @@ module Fedex
       #
       # return a Fedex::Request::Base object
       def initialize(credentials, options={})
-        requires!(options, :shipper, :recipient, :packages, :service_type)
+        requires!(options, :shipper, :recipient, :packages)
         @credentials = credentials
-        @shipper, @recipient, @packages, @service_type, @customs_clearance, @debug = options[:shipper], options[:recipient], options[:packages], options[:service_type], options[:customs_clearance], options[:debug]
+        @shipper, @recipient, @packages, @service_type, @customs_clearance_detail, @debug = options[:shipper], options[:recipient], options[:packages], options[:service_type], options[:customs_clearance_detail], options[:debug]
         @debug = ENV['DEBUG'] == 'true'
         @shipping_options =  options[:shipping_options] ||={}
+        @payment_options = options[:payment_options] ||={}
+        requires!(@payment_options, :type, :account_number, :name, :company, :phone_number, :country_code) if @payment_options.length > 0
+        if options.has_key?(:mps)
+          @mps = options[:mps]
+          requires!(@mps, :package_count, :total_weight, :sequence_number)
+          requires!(@mps, :master_tracking_id) if @mps.has_key?(:sequence_number) && @mps[:sequence_number].to_i >= 2
+        else
+          @mps = {}
+        end
+        # Expects hash with addr and port
+        if options[:http_proxy]
+          self.class.http_proxy options[:http_proxy][:host], options[:http_proxy][:port]
+        end
       end
 
       # Sends post request to Fedex web service and parse the response.
@@ -78,7 +97,7 @@ module Fedex
         }
       end
 
-      # Add Version to xml request, using the latest version V10 Sept/2011
+      # Add Version to xml request, using the version identified in the subclass
       def add_version(xml)
         xml.Version{
           xml.ServiceId service[:id]
@@ -97,7 +116,7 @@ module Fedex
           add_shipper(xml)
           add_recipient(xml)
           add_shipping_charges_payment(xml)
-          add_customs_clearance(xml) if @customs_clearance
+          add_customs_clearance(xml) if @customs_clearance_detail
           xml.RateRequestTypes "ACCOUNT"
           add_packages(xml)
         }
@@ -147,21 +166,57 @@ module Fedex
       # Add shipping charges to xml request
       def add_shipping_charges_payment(xml)
         xml.ShippingChargesPayment{
-          xml.PaymentType "SENDER"
+          xml.PaymentType @payment_options[:type] || "SENDER"
           xml.Payor{
-            xml.AccountNumber @credentials.account_number
-            xml.CountryCode @shipper[:country_code]
+            if service[:version].to_i >= Fedex::API_VERSION.to_i
+              xml.ResponsibleParty {
+                xml.AccountNumber @payment_options[:account_number] || @credentials.account_number
+                xml.Contact {
+                  xml.PersonName @payment_options[:name] || @shipper[:name]
+                  xml.CompanyName @payment_options[:company] || @shipper[:company]
+                  xml.PhoneNumber @payment_options[:phone_number] || @shipper[:phone_number]
+                }
+              }
+            else
+              xml.AccountNumber @payment_options[:account_number] || @credentials.account_number
+              xml.CountryCode @payment_options[:country_code] || @shipper[:country_code]
+            end
           }
         }
       end
 
+      # Add Master Tracking Id (for MPS Shipping Labels, this is required when requesting labels 2 through n)
+      def add_master_tracking_id(xml)
+        if @mps.has_key? :master_tracking_id
+          xml.MasterTrackingId{
+            xml.TrackingIdType @mps[:master_tracking_id][:tracking_id_type]
+            xml.TrackingNumber @mps[:master_tracking_id][:tracking_number]
+          }
+        end
+      end
+
       # Add packages to xml request
       def add_packages(xml)
+        add_master_tracking_id(xml) if @mps.has_key? :master_tracking_id
         package_count = @packages.size
-        xml.PackageCount package_count
+        if @mps.has_key? :package_count
+          xml.PackageCount @mps[:package_count]
+        else
+          xml.PackageCount package_count
+        end
         @packages.each do |package|
           xml.RequestedPackageLineItems{
-            xml.GroupPackageCount 1
+            if @mps.has_key? :sequence_number
+              xml.SequenceNumber @mps[:sequence_number]
+            else
+              xml.GroupPackageCount 1
+            end
+            if package[:insured_value]
+              xml.InsuredValue{
+                xml.Currency package[:insured_value][:currency]
+                xml.Amount package[:insured_value][:amount]
+              }
+            end
             xml.Weight{
               xml.Units package[:weight][:units]
               xml.Value package[:weight][:value]
@@ -175,7 +230,7 @@ module Fedex
               }
             end
             add_customer_references(xml, package)
-            if package[:special_services_requested]
+            if package[:special_services_requested] && package[:special_services_requested][:special_service_types]
               xml.SpecialServicesRequested{
                 if package[:special_services_requested][:special_service_types].is_a? Array
                   package[:special_services_requested][:special_service_types].each do |type|
@@ -250,7 +305,7 @@ module Fedex
       # Add customs clearance(for international shipments)
       def add_customs_clearance(xml)
         xml.CustomsClearanceDetail{
-          hash_to_xml(xml, @customs_clearance)
+          hash_to_xml(xml, @customs_clearance_detail)
         }
       end
 
@@ -268,7 +323,14 @@ module Fedex
       # Build xml nodes dynamically from the hash keys and values
       def hash_to_xml(xml, hash)
         hash.each do |key, value|
-          element = camelize(key)
+          key_s_down = key.to_s.downcase
+          if key_s_down.match(/^commodities_\d{1,}$/)
+            element = 'Commodities'
+          elsif key_s_down.match(/^masked_data_\d{1,}$/)
+            element = 'MaskedData'
+          else
+            element = camelize(key)
+          end
           if value.is_a?(Hash)
             xml.send element do |x|
               hash_to_xml(x, value)

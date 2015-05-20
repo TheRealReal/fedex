@@ -7,7 +7,7 @@ module Fedex
 
       def initialize(credentials, options={})
         super
-        requires! options
+        requires!(options, :service_type)
         # Label specification is required even if we're not using it.
         @label_specification = {
           :label_format_type => 'COMMON2D',
@@ -15,6 +15,7 @@ module Fedex
           :label_stock_type => 'PAPER_LETTER'
         }
         @label_specification.merge! options[:label_specification] if options[:label_specification]
+        @customer_specified_detail = options[:customer_specified_detail] if options[:customer_specified_detail]
       end
 
       # Sends post request to Fedex web service and parse the response.
@@ -37,18 +38,29 @@ module Fedex
       # Add information for shipments
       def add_requested_shipment(xml)
         xml.RequestedShipment{
-          xml.ShipTimestamp Time.now.utc.iso8601(2)
+          xml.ShipTimestamp @shipping_options[:ship_timestamp] ||= Time.now.utc.iso8601(2)
           xml.DropoffType @shipping_options[:drop_off_type] ||= "REGULAR_PICKUP"
           xml.ServiceType service_type
           xml.PackagingType @shipping_options[:packaging_type] ||= "YOUR_PACKAGING"
+          add_total_weight(xml) if @mps.has_key? :total_weight
           add_shipper(xml)
           add_recipient(xml)
           add_shipping_charges_payment(xml)
-          add_customs_clearance(xml) if @customs_clearance
+          add_special_services(xml) if @shipping_options[:return_reason] || @shipping_options[:cod]
+          add_customs_clearance(xml) if @customs_clearance_detail
           add_custom_components(xml)
           xml.RateRequestTypes "ACCOUNT"
           add_packages(xml)
         }
+      end
+
+      def add_total_weight(xml)
+        if @mps.has_key? :total_weight
+          xml.TotalWeight{
+            xml.Units @mps[:total_weight][:units]
+            xml.Value @mps[:total_weight][:value]
+          }
+        end
       end
 
       # Hook that can be used to add custom parts.
@@ -81,6 +93,32 @@ module Fedex
               }
             }
           end
+
+          xml.CustomerSpecifiedDetail{ hash_to_xml(xml, @customer_specified_detail) } if @customer_specified_detail
+        }
+      end
+
+      def add_special_services(xml)
+        xml.SpecialServicesRequested {
+          if @shipping_options[:return_reason]
+            xml.SpecialServiceTypes "RETURN_SHIPMENT"
+            xml.ReturnShipmentDetail {
+              xml.ReturnType "PRINT_RETURN_LABEL"
+              xml.Rma {
+                xml.Reason "#{@shipping_options[:return_reason]}"
+              }
+            }
+          end
+          if @shipping_options[:cod]
+            xml.SpecialServiceTypes "COD"
+            xml.CodDetail {
+              xml.CodCollectionAmount {
+                xml.Currency @shipping_options[:cod][:currency].upcase if @shipping_options[:cod][:currency]
+                xml.Amount @shipping_options[:cod][:amount] if @shipping_options[:cod][:amount]
+              }
+              xml.CollectionType @shipping_options[:cod][:collection_type] if @shipping_options[:cod][:collection_type]
+            }
+          end
         }
       end
 
@@ -89,7 +127,7 @@ module Fedex
         error_message = if response[:process_shipment_reply]
           [response[:process_shipment_reply][:notifications]].flatten.first[:message]
         else
-          api_response["Fault"]["detail"]["fault"]["reason"]
+          "#{api_response["Fault"]["detail"]["fault"]["reason"]}\n--#{api_response["Fault"]["detail"]["fault"]["details"]["ValidationFailureDetail"]["message"].join("\n--")}"
         end rescue $1
         raise RateError, error_message
       end
@@ -102,7 +140,7 @@ module Fedex
       # Build xml Fedex Web Service request
       def build_xml
         builder = Nokogiri::XML::Builder.new do |xml|
-          xml.ProcessShipmentRequest(:xmlns => "http://fedex.com/ws/ship/v10"){
+          xml.ProcessShipmentRequest(:xmlns => "http://fedex.com/ws/ship/v#{service[:version]}"){
             add_web_authentication_detail(xml)
             add_client_detail(xml)
             add_version(xml)
@@ -113,7 +151,7 @@ module Fedex
       end
 
       def service
-        { :id => 'ship', :version => 10 }
+        { :id => 'ship', :version => Fedex::API_VERSION }
       end
 
       # Successful request

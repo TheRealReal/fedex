@@ -29,7 +29,8 @@ module Fedex
     }
 
     attr_reader :tracking_number, :signature_name, :service_type, :status,
-                :delivery_at, :events, :status_code, :unique_tracking_number
+                :delivery_at, :events, :unique_tracking_number, :details, :other_identifiers
+    attr_reader :status_code
 
     def initialize(details = {})
       if details.is_a?(Array)
@@ -44,6 +45,7 @@ module Fedex
       @service_type           = details[:service_type]
       @status                 = details[:status_description]
       @status_code            = details[:status_code]
+      @other_identifiers      = details[:other_identifiers]
 
       if details.has_key?(:actual_delivery_timestamp)
         @delivery_at = Time.parse(details[:actual_delivery_timestamp])
