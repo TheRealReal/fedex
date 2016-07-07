@@ -31,6 +31,10 @@ module Fedex
     attr_reader :tracking_number, :signature_name, :service_type, :status, :status_code, :delivery_at, :events, :unique_tracking_number, :details, :other_identifiers
 
     def initialize(details = {})
+      if details.is_a?(Array)
+        details = details.first
+      end
+
       @details = details
 
       @tracking_number        = details[:tracking_number]
