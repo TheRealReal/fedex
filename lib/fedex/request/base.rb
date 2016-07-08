@@ -232,6 +232,9 @@ module Fedex
             else
               xml.GroupPackageCount 1
             end
+            if package[:item_description]
+              xml.ItemDescription package[:item_description]
+            end
             if package[:insured_value]
               xml.InsuredValue{
                 xml.Currency package[:insured_value][:currency]
